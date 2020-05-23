@@ -217,7 +217,7 @@ def parse_index(data, bid, page_index=None):
     }
 
   # handle page
-  pages = new_data['content']['versions']['master']['pages']
+  pages = next(iter(new_data['content']['versions'].values()))['pages']
   index = -1
   for k, v in pages.items():
     if index < 0:
