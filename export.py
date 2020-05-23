@@ -15,16 +15,11 @@ import urllib
 from PIL import Image
 import sys
 import hashlib
+import logging as log
 
-
-class log:
-  @staticmethod
-  def info(msg):
-    print(f'[INFO][{time.ctime()}] {msg}')
-
-  @staticmethod
-  def error(msg):
-    print(f'[ERROR][{time.ctime()}] {msg}')
+LOG_FORMAT = "[%(levelname)s] [%(asctime)s] %(message)s"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+log.basicConfig(level=log.INFO, format=LOG_FORMAT, datefmt=DATE_FORMAT, handlers=[log.StreamHandler()])
 
 class DocumentHandler:
   def __init__(self, assets_map={}):
@@ -33,7 +28,7 @@ class DocumentHandler:
 
   def handle_node(self, node, indent=0, prefix='', newline=True):
     """
-    解析路径 block paragraph -> text
+    block paragraph -> text
     block table -> block table-row > block table-cell > block paragraph
     """
 
@@ -60,7 +55,7 @@ class DocumentHandler:
         self.handle_node(row, indent, '')
       return
 
-    elif node['kind'] == 'block':
+    elif node['kind'] in ('block', 'inline'):
       if node['type'] == 'paragraph':
         for row in node['nodes']:
           self.handle_node(row, indent, prefix)
@@ -115,26 +110,51 @@ class DocumentHandler:
         self.fd.write('\n')
         if node['data'].get('assetID'):
           _asset = self.assets_map.get(node['data']['assetID'])
-          self.fd.write('![%s](%s)' % (node['data'].get('caption', node['key']), _asset['value']))
+          self.fd.write('![%s](%s)\n' % (node['data'].get('caption', node['key']), _asset['value']))
 
-        # download of need
-        if not os.path.exists(_asset['filename']):
-          download_assets(_asset['filename'], _asset['url'])
+          # download of need
+          if not os.path.exists(_asset['filename']):
+            download_assets(_asset['filename'], _asset['url'])
 
       elif node['type'] == 'blockquote':
         self.fd.write('> ')
         for row in node['nodes']:
           self.handle_node(row)
 
+      elif node['type'] == 'code':
+        self.fd.write('\n```\n')
+        for row in node['nodes']:
+          self.handle_node(row)
+        # backspace 1byte
+        self.fd.seek(self.fd.tell() - 1)
+        self.fd.write('```\n')
+
+      elif node['type'] in ('code-tab'):
+        for row in node['nodes']:
+          self.handle_node(row, newline=False)
+
+      elif node['type'] in ('code-line'):
+        for row in node['nodes']:
+          self.handle_node(row)
+
+      elif node['type'] == 'link':
+        self.fd.write('[')
+        for row in node['nodes']:
+          self.handle_node(row, newline=False)
+        self.fd.write('](%s)' % node['data'].get('href', '#'))
+
       else:
         log.error(node)
 
       self.fd.write('\n')
 
-    elif node['kind'] == 'document':
+    elif node['kind'] in 'document':
       for row in node['nodes']:
         self.handle_node(row, indent, prefix)
       return
+
+    else:
+      log.error(node)
 
   def parse_gitlab_doc(self, data, meta=None, filename=None):
     # self.fd.seek(0)
@@ -165,7 +185,7 @@ def parse_gitbook_state(raw_data):
   return data
 
 
-def parse_index(data, bid):
+def parse_index(data, bid, page_index=None):
   cdn_prefix = data['config']['cdn']['blobsurl']
   log.info(cdn_prefix)
 
@@ -203,9 +223,13 @@ def parse_index(data, bid):
     if index < 0:
       index += 1
       continue
-    
-    log.info(v['title'])
-    log.info(v['description'])
+
+    if page_index and index != page_index:
+      log.info('skip page %d %s' % (index, v['title']))
+      index += 1
+      continue
+
+    log.info('new page %s: %s' % (v['title'], v['description']))
     if v.get('documentURL'):
       json_url = cdn_prefix + re.search('documents.*$', v['documentURL']).group()
       _filename = 'docs/%s/%02d %s' % (bid, index, v['title'])
@@ -252,7 +276,7 @@ def usage():
   
 if __name__ == '__main__':
   # gitbook url
-  if len(sys.argv) != 2:
+  if len(sys.argv) < 2:
     usage()
 
   url = sys.argv[1]
@@ -294,5 +318,9 @@ if __name__ == '__main__':
       f.write(raw_data)
 
   log.info(f"start parse {url} {bid}")
-  parse_index(data, bid)
+  if len(sys.argv) == 3:
+    # convenient reget
+    parse_index(data, bid, int(sys.argv[2]))
+  else:
+    parse_index(data, bid)
 
