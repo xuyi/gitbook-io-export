@@ -13,6 +13,8 @@ from io import StringIO
 import shutil
 import urllib
 from PIL import Image
+import sys
+import hashlib
 
 
 class log:
@@ -112,7 +114,12 @@ class DocumentHandler:
       elif node['type'] == 'image':
         self.fd.write('\n')
         if node['data'].get('assetID'):
-          self.fd.write('![%s](%s)' % (node['data'].get('caption', node['key']), self.assets_map.get(node['data']['assetID'])))
+          _asset = self.assets_map.get(node['data']['assetID'])
+          self.fd.write('![%s](%s)' % (node['data'].get('caption', node['key']), _asset['value']))
+
+        # download of need
+        if not os.path.exists(_asset['filename']):
+          download_assets(_asset['filename'], _asset['url'])
 
       elif node['type'] == 'blockquote':
         self.fd.write('> ')
@@ -147,15 +154,18 @@ class DocumentHandler:
         shutil.copyfileobj(self.fd, f)
 
 
-def parse_index(data):
-  soup = BeautifulSoup(data, 'html5lib')
+def parse_gitbook_state(raw_data):
+  soup = BeautifulSoup(raw_data, 'html5lib')
   title = soup.title.text
-  
+
   pattern = re.compile(r'window.GITBOOK_STATE = (.*);', re.MULTILINE | re.DOTALL)
   script = soup.find("script", text=pattern)
   match = pattern.search(script.text)
   data = json.loads(match.group(1))
+  return data
 
+
+def parse_index(data, bid):
   cdn_prefix = data['config']['cdn']['blobsurl']
   log.info(cdn_prefix)
 
@@ -175,12 +185,16 @@ def parse_index(data):
 
   for key, asset in assets.items():
     img_url = cdn_prefix + re.search('assets.*$', asset['downloadURL']).group()
-    log.info(img_url)
+    # log.info(img_url)
     img_suffix = urllib.parse.unquote(img_url).split('?')[-2].split('/')[-1].split('.')[-1]
-    img_filename = 'docs/assets/%s.%s' % (key, img_suffix)
+    img_filename = f'docs/{bid}/assets/{key}.{img_suffix}'
     # print(urllib.parse.unquote(img_url).split('/?')[-2])
-    download_assets(img_filename, img_url)
-    assets_map[key] = 'assets/%s.%s' % (key, img_suffix)
+
+    assets_map[key] = {
+      'value': f'assets/{key}.{img_suffix}',
+      'filename': img_filename,
+      'url': img_url
+    }
 
   # handle page
   pages = new_data['content']['versions']['master']['pages']
@@ -194,12 +208,13 @@ def parse_index(data):
     log.info(v['description'])
     if v.get('documentURL'):
       json_url = cdn_prefix + re.search('documents.*$', v['documentURL']).group()
-      filename = 'docs/%02d.json' % index
+      _filename = 'docs/%s/%02d %s' % (bid, index, v['title'])
+      # filename = 'docs/%s/%02d.json' % (bid, index)
 
-      json_data = get_json_data(filename, json_url)
+      json_data = get_json_data(_filename + '.json', json_url)
 
       handler = DocumentHandler(assets_map=assets_map)
-      handler.parse_gitlab_doc(json_data, filename='docs/%02d.md' % index, meta={
+      handler.parse_gitlab_doc(json_data, filename=_filename + '.md', meta={
         'title': v['title'],
         'description': v['description'],
       })
@@ -224,21 +239,60 @@ def download_assets(filename, url):
   if os.path.exists(filename):
     return
 
+  log.info(f"start download asset: {url}")
   r = requests.get(url, stream=True, headers={'User-Agent': 'Mozilla/5.0 (Windows; U; MSIE 9.0; Windows NT 9.0; en-US)'})
   with open(filename, 'wb') as f:
     r.raw.decode_content = True
     shutil.copyfileobj(r.raw, f)
   time.sleep(1)
+
+def usage():
+  print("Usage: ./export.py [url]")
+  exit()
   
 if __name__ == '__main__':
-  with open("docs/index.html") as f:
-    parse_index(f.read())
-    
+  # gitbook url
+  if len(sys.argv) != 2:
+    usage()
 
-  # exit()
+  url = sys.argv[1]
 
-  # with open("docs/document.json") as f:
-  #   data = json.loads(f.read())
+  bid = hashlib.md5(url.encode('utf8')).hexdigest()
 
-  # parse_gitlab_doc(data)
+  cache_file = f'./docs/{bid}/index.html'
+  if os.path.exists(cache_file):
+    log.info(f"get {bid} from cache")
+    with open(cache_file) as f:
+      raw_data = f.read()
+
+    try:
+      data = parse_gitbook_state(raw_data)
+    except:
+      log.error(f"parse gitbook state error")
+      os.remove(cache_file)
+      exit()
+
+  else:
+    log.info(f"get {bid} from request")
+    try:
+      r = requests.get(url)
+    except:
+      log.error(f"request {url} error")
+      exit()
+
+    raw_data = r.text
+
+    try:
+      data = parse_gitbook_state(raw_data)
+    except Exception as e:
+      log.error(f"parse gitbook state error: {e.__str__()}")
   
+    if not os.path.exists(f'./docs/{bid}/assets'):
+      os.makedirs(f'./docs/{bid}/assets', exist_ok=True)
+
+    with open(cache_file, "w+") as f:
+      f.write(raw_data)
+
+  log.info(f"start parse {url} {bid}")
+  parse_index(data, bid)
+
